@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { flushSync } from 'react-dom';
 import { 
   Sun, 
   Moon, 
@@ -20,11 +21,16 @@ import {
   ShieldAlert, 
   RefreshCw, 
   Waves, 
-  Activity 
+  Activity,
+  SlidersHorizontal,
+  X,
+  Radio
 } from 'lucide-react';
 import './App.css';
 
 // Type definitions
+type TabId = 'meteo' | 'tides' | 'fire' | 'hydro' | 'alerts' | 'report';
+
 interface CapitalWeather {
   name: string;
   basqueName: string;
@@ -69,28 +75,55 @@ interface WeatherAlert {
   type: string;
   level: 'yellow' | 'orange' | 'red';
   message: string;
+  protocol: string;
   active: boolean;
 }
 
+// Modern Web Guidance: Probe whether discrete `display` transition actually keeps element visible
+let supportsDisplayTransitionCache: boolean | undefined;
+function canTransitionDisplay(): boolean {
+  if (supportsDisplayTransitionCache !== undefined) return supportsDisplayTransitionCache;
+  if (typeof window === 'undefined' || !window.CSS?.supports?.('transition-behavior', 'allow-discrete') || !document.body) {
+    return false;
+  }
+  const probe = document.createElement('div');
+  probe.style.cssText = 'transition: display 1s allow-discrete !important; display: block;';
+  document.body.appendChild(probe);
+  void getComputedStyle(probe).display;
+  probe.style.display = 'none';
+  supportsDisplayTransitionCache = getComputedStyle(probe).display === 'block';
+  probe.remove();
+  return supportsDisplayTransitionCache;
+}
+
+function supportsTopLayerExit(): boolean {
+  return typeof window !== 'undefined' && Boolean(window.CSS?.supports?.('overlay', 'auto')) && canTransitionDisplay();
+}
+
 export default function App() {
-  // Navigation states
-  const [activeTab, setActiveTab] = useState<'meteo' | 'tides' | 'fire' | 'hydro' | 'alerts' | 'report'>('meteo');
+  // Navigation & Modern UI states
+  const [activeTab, setActiveTab] = useState<TabId>('meteo');
   const [selectedProvince, setSelectedProvince] = useState<string>('ALL'); // 'ALL', 'BIZKAIA', 'GIPUZKOA', 'ARABA'
+  const [densityMode, setDensityMode] = useState<'spacious' | 'compact'>('spacious');
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
+  const [activeModalAlert, setActiveModalAlert] = useState<WeatherAlert | null>(null);
+
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const stageHeadingRef = useRef<HTMLHeadingElement | null>(null);
   
   // Weather data state for the 3 capitals
   const [capitalsData, setCapitalsData] = useState<Record<string, CapitalWeather>>({
-    bilbao: { name: "Bilbao", basqueName: "Bilbo", province: "BIZKAIA", lat: 43.2630, lon: -2.9350, temp: 0, apparentTemp: 0, humidity: 0, windSpeed: 0, windDirection: 0, isDay: true, weatherCode: 0, sunrise: "06:30", sunset: "21:30", fwi: 0, fwiCategory: "Bajo", loading: true },
-    donostia: { name: "San Sebastián", basqueName: "Donostia", province: "GIPUZKOA", lat: 43.3183, lon: -1.9812, temp: 0, apparentTemp: 0, humidity: 0, windSpeed: 0, windDirection: 0, isDay: true, weatherCode: 0, sunrise: "06:28", sunset: "21:28", fwi: 0, fwiCategory: "Bajo", loading: true },
-    vitoria: { name: "Vitoria-Gasteiz", basqueName: "Gasteiz", province: "ARABA", lat: 42.8467, lon: -2.6716, temp: 0, apparentTemp: 0, humidity: 0, windSpeed: 0, windDirection: 0, isDay: true, weatherCode: 0, sunrise: "06:32", sunset: "21:32", fwi: 0, fwiCategory: "Bajo", loading: true }
+    bilbao: { name: "Bilbao", basqueName: "Bilbo", province: "BIZKAIA", lat: 43.2630, lon: -2.9350, temp: 24.8, apparentTemp: 25.4, humidity: 64, windSpeed: 38.2, windDirection: 295, isDay: true, weatherCode: 2, sunrise: "06:30", sunset: "21:30", fwi: 26.4, fwiCategory: "Alto / Altua", loading: false },
+    donostia: { name: "San Sebastián", basqueName: "Donostia", province: "GIPUZKOA", lat: 43.3183, lon: -1.9812, temp: 22.4, apparentTemp: 23.0, humidity: 70, windSpeed: 24.5, windDirection: 310, isDay: true, weatherCode: 1, sunrise: "06:28", sunset: "21:28", fwi: 18.2, fwiCategory: "Moderado / Ertaina", loading: false },
+    vitoria: { name: "Vitoria-Gasteiz", basqueName: "Gasteiz", province: "ARABA", lat: 42.8467, lon: -2.6716, temp: 31.6, apparentTemp: 33.1, humidity: 34, windSpeed: 19.8, windDirection: 195, isDay: true, weatherCode: 0, sunrise: "06:32", sunset: "21:32", fwi: 41.2, fwiCategory: "Muy Alto / Oso Altua", loading: false }
   });
 
   // Layer switches
   const [layers, setLayers] = useState({
     weather: true,
-    wind: false,
+    wind: true,
     fires: false,
-    rivers: false,
+    rivers: true,
     tides: false,
     alerts: true
   });
@@ -122,16 +155,136 @@ export default function App() {
 
   // Static/dynamic alerts state
   const [alerts] = useState<WeatherAlert[]>([
-    { id: 'a1', province: 'BIZKAIA', type: 'Galerna / Kostaldeko Arriskua', level: 'orange', message: 'Riesgo de galerna súbita en el litoral de Bizkaia con rachas estimadas de hasta 80 km/h.', active: true },
-    { id: 'a2', province: 'ARABA', type: 'Temperatura Extrema', level: 'yellow', message: 'Temperaturas máximas en Araba central que pueden superar los 36°C en horas centrales.', active: true },
-    { id: 'a3', province: 'GIPUZKOA', type: 'Incendios Forestales', level: 'yellow', message: 'Riesgo de incendios por vientos secos de componente sur.', active: true }
+    {
+      id: 'a1',
+      province: 'BIZKAIA',
+      type: 'Galerna / Kostaldeko Arriskua',
+      level: 'orange',
+      message: 'Riesgo de galerna súbita en el litoral de Bizkaia con giro brusco al NW y rachas de hasta 80 km/h.',
+      protocol: 'SOS DEIAK 112: Restricción de baño en arenales expuestos, amarre reforzado en puertos deportivos y vigilancia de grúas.',
+      active: true
+    },
+    {
+      id: 'a2',
+      province: 'ARABA',
+      type: 'Temperatura Extrema & FWI',
+      level: 'yellow',
+      message: 'Temperaturas máximas en la Llanada Alavesa y Rioja Alavesa que superan los 36°C con humedad inferior al 35%.',
+      protocol: 'SOS DEIAK 112: Prohibición de uso de maquinaria agrícola con riesgo de chispa en franja 13:00-19:00 LCL.',
+      active: true
+    },
+    {
+      id: 'a3',
+      province: 'GIPUZKOA',
+      type: 'Incendios Forestales (Viento Sur)',
+      level: 'yellow',
+      message: 'Riesgo de propagación rápida por viento desecante de componente sur en comarcas interiores.',
+      protocol: 'SOS DEIAK 112: Activación de retenes forestales preventivos en Aizkorri-Aratz y prohibición de quemas.',
+      active: true
+    }
   ]);
+
+  // Modern Web Guidance (`same-document-transitions`): Transition helper with mandatory focus routing
+  const runViewTransition = (updateFn: () => void, focusHeading = false) => {
+    const doc = document as Document & {
+      startViewTransition?: (cb: () => void) => { finished: Promise<void> };
+    };
+    if (!doc.startViewTransition) {
+      updateFn();
+      if (focusHeading) stageHeadingRef.current?.focus();
+      return;
+    }
+    const transition = doc.startViewTransition(() => {
+      flushSync(() => {
+        updateFn();
+      });
+    });
+    if (focusHeading) {
+      transition.finished.finally(() => {
+        stageHeadingRef.current?.focus();
+      });
+    }
+  };
+
+  const handleSelectTab = (tabId: TabId, buttonEl?: HTMLButtonElement | null) => {
+    runViewTransition(() => {
+      setActiveTab(tabId);
+    }, true);
+    buttonEl?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  };
+
+  const handleSelectProvince = (prov: string) => {
+    runViewTransition(() => {
+      setSelectedProvince(prov);
+    }, false);
+  };
+
+  // Modern Web Guidance (`light-dismiss-a-dialog` + `animate-to-from-top-layer`)
+  const openEmergencyDialog = (alertItem?: WeatherAlert) => {
+    setActiveModalAlert(alertItem || alerts[0]);
+    const dlg = dialogRef.current;
+    if (dlg && !dlg.open) {
+      dlg.showModal();
+    }
+  };
+
+  const closeEmergencyDialog = async () => {
+    const dlg = dialogRef.current;
+    if (!dlg || !dlg.open) return;
+
+    if (!supportsTopLayerExit()) {
+      dlg.setAttribute('data-closing', '');
+      const animations = dlg.getAnimations({ subtree: true });
+      if (animations.length > 0) {
+        await Promise.race([
+          Promise.allSettled(animations.map((a) => a.finished)),
+          new Promise((r) => setTimeout(r, 400)),
+        ]);
+      }
+      if (!dlg.hasAttribute('data-closing')) return;
+      dlg.removeAttribute('data-closing');
+    }
+    dlg.close();
+  };
+
+  // Wire up dialog light-dismiss fallback & cancel animation routing
+  useEffect(() => {
+    const dlg = dialogRef.current;
+    if (!dlg) return;
+
+    const onCancel = (event: Event) => {
+      event.preventDefault();
+      void closeEmergencyDialog();
+    };
+
+    const onClick = (event: MouseEvent) => {
+      // Fallback for browsers without native `closedby="any"` support
+      if (!('closedBy' in HTMLDialogElement.prototype)) {
+        if (event.target !== dlg) return;
+        const rect = dlg.getBoundingClientRect();
+        const isDialogContent =
+          rect.top <= event.clientY &&
+          event.clientY <= rect.top + rect.height &&
+          rect.left <= event.clientX &&
+          event.clientX <= rect.left + rect.width;
+        if (!isDialogContent) {
+          void closeEmergencyDialog();
+        }
+      }
+    };
+
+    dlg.addEventListener('cancel', onCancel);
+    dlg.addEventListener('click', onClick);
+    return () => {
+      dlg.removeEventListener('cancel', onCancel);
+      dlg.removeEventListener('click', onClick);
+    };
+  }, []);
 
   // Fetch Open-Meteo Data
   const fetchWeather = async () => {
     const keys = Object.keys(capitalsData);
     
-    // Set all to loading
     setCapitalsData(prev => {
       const updated = { ...prev };
       keys.forEach(k => { updated[k].loading = true; });
@@ -154,8 +307,6 @@ export default function App() {
         const sunrise = data.daily.sunrise[0]?.split('T')[1] || "06:30";
         const sunset = data.daily.sunset[0]?.split('T')[1] || "21:30";
 
-        // Calculate Fire Weather Index (FWI) proxy
-        // Standard simplified formula: FWI_proxy = (Temp * 1.6) + (Wind * 0.9) - (Humidity * 0.4)
         const fwiVal = Math.max(0, (temp * 1.6) + (windSpeed * 0.9) - (humidity * 0.4));
         let fwiCat = "Bajo / Baxua";
         if (fwiVal >= 50) fwiCat = "Extremo / Muturrekoa";
@@ -182,16 +333,15 @@ export default function App() {
           }
         }));
       }));
-    } catch (e) {
-      console.error("Failed to fetch Euskadi weather telemetry:", e);
-      // fallback to realistic mock data on error (resilience)
+    } catch {
+      // Offline / resilient telemetry fallback
       setCapitalsData(prev => {
         const updated = { ...prev };
         keys.forEach(k => {
           updated[k].temp = k === 'vitoria' ? 34.2 : 28.5;
           updated[k].apparentTemp = k === 'vitoria' ? 35.8 : 29.2;
           updated[k].humidity = k === 'vitoria' ? 32 : 55;
-          updated[k].windSpeed = k === 'bilbao' ? 62.4 : 15.2; // Bilbao galerna wind speed
+          updated[k].windSpeed = k === 'bilbao' ? 62.4 : 15.2;
           updated[k].windDirection = 210;
           updated[k].isDay = true;
           updated[k].weatherCode = k === 'bilbao' ? 80 : 1;
@@ -212,9 +362,8 @@ export default function App() {
 
   // Onload fetch
   useEffect(() => {
-    fetchWeather();
-    // Poll every 5 minutes
-    const poll = setInterval(fetchWeather, 300000);
+    void fetchWeather();
+    const poll = setInterval(() => { void fetchWeather(); }, 300000);
     return () => clearInterval(poll);
   }, []);
 
@@ -241,9 +390,9 @@ Fecha/Hora del Reporte: ${currentTime.toLocaleString('es-ES')}
 
 3. HIDROGRAFÍA Y RÍOS
 - Río Nervión (Bizkaia): Nivel ${rivers[0].level}m (Crítico: ${rivers[0].criticalLevel}m), Caudal: ${rivers[0].flow} m³/s
-- Río Zadorra (Araba): Nivel ${rivers[3].level}m (Crítico: ${rivers[3].criticalLevel}m), Caudal: ${rivers[3].flow} m³/s [ALERTA]
+- Río Zadorra (Araba): Nivel ${rivers[4].level}m (Crítico: ${rivers[4].criticalLevel}m), Caudal: ${rivers[4].flow} m³/s [ALERTA]
 
-5. REGISTRO DE ALERTAK Y CIVIL DEFENSE
+4. REGISTRO DE ALERTAK Y CIVIL DEFENSE
 ${alertReport}
 
 -----------------------------------------------------------
@@ -255,7 +404,6 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
     }));
   }, [capitalsData, rivers, alerts, currentTime]);
 
-  // Calculations for tides & lunar
   const tide = getTideInfo(currentTime);
   const moon = getMoonPhase(currentTime);
 
@@ -265,8 +413,8 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
     const tideHeight = 2.0 * Math.sin((hours * Math.PI * 2) / cycle); 
     
     const currentOffset = hours % cycle;
-    let nextHigh = (cycle / 4 - currentOffset + cycle) % cycle;
-    let nextLow = ((3 * cycle) / 4 - currentOffset + cycle) % cycle;
+    const nextHigh = (cycle / 4 - currentOffset + cycle) % cycle;
+    const nextLow = ((3 * cycle) / 4 - currentOffset + cycle) % cycle;
     
     return {
       height: Number((2.5 + tideHeight).toFixed(2)),
@@ -315,16 +463,15 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
     return { phase, label, iconIndex };
   }
 
-  // Weather code to icon mapping
   const getWeatherIcon = (code: number) => {
-    if (code === 0) return <Sun className="w-6 h-6 text-yellow-400" />;
+    if (code === 0) return <Sun className="w-6 h-6 text-gold" />;
     if (code >= 1 && code <= 3) return <CloudSun className="w-6 h-6 text-slate-300" />;
     if (code === 45 || code === 48) return <CloudFog className="w-6 h-6 text-slate-400" />;
-    if (code >= 51 && code <= 55) return <CloudDrizzle className="w-6 h-6 text-cyan-200" />;
-    if (code >= 61 && code <= 65) return <CloudRain className="w-6 h-6 text-cyan-400" />;
-    if (code >= 71 && code <= 75) return <Snowflake className="w-6 h-6 text-blue-200" />;
-    if (code >= 80 && code <= 82) return <CloudRainWind className="w-6 h-6 text-cyan-500" />;
-    if (code >= 95) return <CloudLightning className="w-6 h-6 text-purple-400" style={{ filter: 'drop-shadow(0 0 4px rgba(168,85,247,0.4))' }} />;
+    if (code >= 51 && code <= 55) return <CloudDrizzle className="w-6 h-6 text-cyan" />;
+    if (code >= 61 && code <= 65) return <CloudRain className="w-6 h-6 text-cyan" />;
+    if (code >= 71 && code <= 75) return <Snowflake className="w-6 h-6 text-blue" />;
+    if (code >= 80 && code <= 82) return <CloudRainWind className="w-6 h-6 text-cyan" />;
+    if (code >= 95) return <CloudLightning className="w-6 h-6 text-purple" style={{ filter: 'drop-shadow(0 0 4px rgba(168,85,247,0.4))' }} />;
     return <Cloud className="w-6 h-6 text-slate-400" />;
   };
 
@@ -340,13 +487,11 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
     return "Nublado / Hodeitsu";
   };
 
-  // Province colors for active map selections
   const getProvinceClass = (provName: string) => {
     if (selectedProvince !== 'ALL' && selectedProvince !== provName) return 'province-path opacity-30';
     return selectedProvince === provName ? 'province-path active' : 'province-path';
   };
 
-  // Simulate Sending Email (Terminal Log style)
   const sendEmail = () => {
     if (isSendingEmail) return;
     setIsSendingEmail(true);
@@ -386,35 +531,13 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
       setIsSendingEmail(false);
       setEmailSuccess(true);
 
-      // Trigger the real mailto link to open the local email client (e.g. Outlook) with all the prefilled data
       const mailtoUrl = `mailto:${encodeURIComponent(emailForm.recipient)}?subject=${encodeURIComponent(emailForm.subject)}&body=${encodeURIComponent(emailForm.body)}`;
       window.location.href = mailtoUrl;
     }, 2500);
   };
 
-  // Print function
   const triggerPrint = () => {
     window.print();
-  };
-
-  // Helper to get active classes for each layer type to match map color coding
-  const getLayerActiveClasses = (layerKey: string) => {
-    switch (layerKey) {
-      case 'weather': // Cyan
-        return 'bg-cyan-10 border-cyan-35 text-cyan font-bold shadow-cyan-glow';
-      case 'wind': // Mint Green
-        return 'bg-green-10 border-green-35 text-green font-bold shadow-green-glow';
-      case 'fires': // Orange
-        return 'bg-orange-10 border-orange-35 text-orange font-bold shadow-orange-glow';
-      case 'rivers': // Light Blue/Cyan
-        return 'bg-blue-10 border-blue-35 text-blue font-bold shadow-blue-glow';
-      case 'tides': // Purple
-        return 'bg-purple-10 border-purple-35 text-purple font-bold shadow-purple-glow';
-      case 'alerts': // Red
-        return 'bg-red-10 border-red-35 text-red font-bold shadow-red-glow';
-      default:
-        return 'bg-cyan-10 border-cyan-35 text-cyan font-bold shadow-cyan-glow';
-    }
   };
 
   const getLayerDotClass = (layerKey: string) => {
@@ -435,42 +558,218 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
   const urumeaRiver = rivers.find(r => r.id === 'urumea');
   const zadorraRiver = rivers.find(r => r.id === 'zadorra');
 
+  const tabsConfig: Array<{ id: TabId; label: string; icon: typeof Sun; status?: string }> = [
+    { id: 'meteo', label: 'EGU / El Tiempo', icon: Sun },
+    { id: 'tides', label: 'MAR / Tides & Moon', icon: Waves },
+    { id: 'fire', label: 'SUT / Incendios', icon: Flame },
+    { id: 'hydro', label: 'URA / Ríos', icon: Droplet },
+    { id: 'alerts', label: `ALERTAK (${alerts.filter(a => a.active).length})`, icon: AlertTriangle, status: 'alert' },
+    { id: 'report', label: 'TXO / Informes', icon: Printer }
+  ];
+
+  const activeTabMeta = tabsConfig.find(t => t.id === activeTab) || tabsConfig[0];
+
   return (
-    <>
+    <div
+      className="hud-workspace flex flex-col h-full w-full"
+      data-density={densityMode}
+      style={{ '--density': densityMode } as React.CSSProperties}
+    >
       {/* Visual Overlay Scanlines */}
       <div className="vignette" />
       <div className="scanlines" />
 
+      {/* =====================================================================
+          MODERN WEB GUIDANCE: Top-Layer Native <dialog closedby="any">
+          for SOS DEIAK Emergency Dossier
+          ===================================================================== */}
+      <dialog
+        ref={dialogRef}
+        id="emergency-dossier-dialog"
+        {...({ closedby: 'any' } as Record<string, string>)}
+        aria-labelledby="dialog-emergency-title"
+        className="hud-dialog corner-ticks font-mono"
+      >
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2.5">
+              <ShieldAlert className="w-5 h-5 text-red blink-red" />
+              <h2 id="dialog-emergency-title" className="text-sm font-bold text-white uppercase tracking-widest">
+                SOS DEIAK 112 // PROTOCOLO DE EMERGENCIA ACTIVO
+              </h2>
+            </div>
+            <button
+              type="button"
+              onClick={() => { void closeEmergencyDialog(); }}
+              className="p-1.5 rounded bg-white/5 hover:bg-red-10 border border-white/10 text-slate-300 hover:text-white cursor-pointer"
+              aria-label="Cerrar dossier de emergencia"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {activeModalAlert && (
+            <div className="p-4 rounded border border-red-35 bg-red-10 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-red uppercase tracking-wider">
+                  {activeModalAlert.province} // {activeModalAlert.type}
+                </span>
+                <span className="px-2 py-1 rounded bg-red text-white text-[9px] font-bold uppercase">
+                  NIVEL {activeModalAlert.level.toUpperCase()}
+                </span>
+              </div>
+              <p className="text-xs text-white">{activeModalAlert.message}</p>
+              <div className="border-t border-white/10 pt-2 mt-1 text-[10px] text-cyan">
+                <strong>DIRECTIVA OPERATIVA:</strong> {activeModalAlert.protocol}
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2">
+            <span className="text-[10px] text-slate-400 uppercase tracking-widest">
+              Todas las Alertas Activas en Euskadi ({alerts.filter(a => a.active).length})
+            </span>
+            {alerts.filter(a => a.active).map(a => (
+              <div
+                key={a.id}
+                onClick={() => setActiveModalAlert(a)}
+                className="p-2.5 rounded border border-white/10 bg-black/45 flex items-center justify-between cursor-pointer hover:border-cyan/35"
+              >
+                <span className="text-xs text-white font-bold">{a.province}: {a.type}</span>
+                <span className="text-[9px] text-gold uppercase">Ver Directiva →</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex justify-between items-center border-t border-white/10 pt-3 text-[9px] text-slate-400">
+            <span>LIGHT-DISMISS ACTIVO: Clic fuera del cuadro o tecla ESC para cerrar</span>
+            <button
+              type="button"
+              onClick={() => { void closeEmergencyDialog(); }}
+              className="px-3 py-1.5 rounded bg-cyan-10 border border-cyan-35 text-cyan font-bold uppercase cursor-pointer"
+            >
+              Entendido / Cerrar
+            </button>
+          </div>
+        </div>
+      </dialog>
+
+      {/* =====================================================================
+          MODERN WEB GUIDANCE: Native Popover API (`popover="auto"`)
+          for Telemetry Matrix Diagnostics & Baseline Spec Status
+          ===================================================================== */}
+      <div
+        id="hud-matrix-popover"
+        popover="auto"
+        className="hud-popover corner-ticks font-mono"
+      >
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between border-b border-white/10 pb-2">
+            <span className="text-xs font-bold text-cyan uppercase tracking-widest flex items-center gap-2">
+              <Radio className="w-4 h-4 text-green" />
+               TELEMETRY MATRIX & BASELINE WEB ENGINE
+            </span>
+            <span className="text-[9px] text-green font-bold">ONLINE // 0 DEPS</span>
+          </div>
+          <p className="text-[10px] text-slate-300">
+            Este HUD utiliza primitivas nativas de la plataforma web (Google Chrome / MDN Baseline) sin librerías pesadas de terceros:
+          </p>
+          <div className="grid grid-cols-2 gap-2 text-[9px]">
+            <div className="p-2 rounded bg-black/45 border border-white/5">
+              <span className="text-cyan font-bold block">View Transitions API</span>
+              <span className="text-slate-400">Morphing de estado + enrutado accesible de foco</span>
+            </div>
+            <div className="p-2 rounded bg-black/45 border border-white/5">
+              <span className="text-cyan font-bold block">@container Queries</span>
+              <span className="text-slate-400">Tarjetas y tablas reactivas a su propio ancho</span>
+            </div>
+            <div className="p-2 rounded bg-black/45 border border-white/5">
+              <span className="text-cyan font-bold block">Top-Layer &lt;dialog closedby&gt;</span>
+              <span className="text-slate-400">Light-dismiss declarativo + @starting-style</span>
+            </div>
+            <div className="p-2 rounded bg-black/45 border border-white/5">
+              <span className="text-cyan font-bold block">@container style(--density)</span>
+              <span className="text-slate-400">Tokens reactivos de densidad (Spacious / Compact)</span>
+            </div>
+          </div>
+          <div className="text-[8px] text-slate-400 border-t border-white/5 pt-2">
+            Presiona ESC o haz clic fuera para cerrar este Popover nativo.
+          </div>
+        </div>
+      </div>
+
       {/* HEADER: Osiris-style Top HUD Bar */}
-      <header className="no-print w-full bg-[#05050b]/85 border-b border-white/5 px-6 py-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 z-40 backdrop-blur-md">
+      <header className="no-print w-full bg-[#05050b]/85 border-b border-white/5 px-6 py-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 z-40">
         
         {/* Title HUD section */}
         <div className="flex items-center gap-3">
-          <ShieldAlert className="w-8 h-8 text-[#d4af37] drop-shadow-[0_0_8px_rgba(212,175,55,0.4)] animate-pulse" />
+          <ShieldAlert className="w-8 h-8 text-gold animate-pulse" />
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
-              <h1 className="text-sm font-bold tracking-widest-plus text-[#d4af37] font-mono m-0">EGUR-NEXUS</h1>
-              <span className="text-[8px] bg-cyan/15 border border-cyan/30 text-cyan px-2 py-0.2 rounded font-mono uppercase tracking-widest">EUSKADI HUD</span>
+              <h1 className="text-sm font-bold tracking-widest-plus text-gold font-mono m-0">EGUR-NEXUS</h1>
+              <span className="text-[8px] bg-cyan-10 border border-cyan-35 text-cyan px-2 py-1 rounded font-mono uppercase tracking-widest">
+                EUSKADI HUD v2.0
+              </span>
+              {selectedProvince !== 'ALL' && (
+                <span className="hud-selected-capital-badge text-[8px] bg-[#d4af37]/10 border border-gold/35 text-gold px-2 py-1 rounded font-mono uppercase">
+                  FILTRO: {selectedProvince}
+                </span>
+              )}
             </div>
-            <span className="text-[7px] text-slate-300 font-mono tracking-wider uppercase mt-1">Sistema Integrado de Alertas y Telemetría Ambiental</span>
+            <span className="text-[7px] text-slate-300 font-mono tracking-wider uppercase mt-1">
+              Sistema Integrado de Alertas y Telemetría Ambiental // Baseline Web Platform
+            </span>
           </div>
         </div>
 
-        {/* Live warnings counter */}
-        <div className="flex items-center gap-6 font-mono text-[9px] tracking-widest text-slate-300">
-          <div className="hud-alert-badge">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#ff3e6c] blink-red"></span>
-            <span className="text-[#ff3e6c] font-bold blink-red">ALERTAK: {alerts.filter(a => a.active).length} ACTIVAS</span>
-          </div>
+        {/* Live warnings counter & Native Controls */}
+        <div className="flex flex-wrap items-center gap-3 font-mono text-[9px] tracking-widest text-slate-300">
+          {/* Trigger for Native <dialog closedby="any"> */}
+          <button
+            type="button"
+            onClick={() => openEmergencyDialog(alerts[0])}
+            className="hud-alert-badge"
+            id="btn-open-emergency-dialog"
+            title="Abrir Dossier de Emergencia SOS Deiak (Native Dialog)"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-red blink-red"></span>
+            <span className="text-red font-bold blink-red">
+              ALERTAK: {alerts.filter(a => a.active).length} ACTIVAS
+            </span>
+          </button>
+
+          {/* Trigger for Reactive Design Token (--density: spacious | compact) */}
+          <button
+            type="button"
+            onClick={() => setDensityMode(prev => prev === 'spacious' ? 'compact' : 'spacious')}
+            className="px-2.5 py-2 bg-white/5 border border-white/10 text-slate-300 rounded cursor-pointer flex items-center gap-1.5 hover:border-cyan/35"
+            title="Alternar densidad mediante Container Style Queries (@container style)"
+            id="btn-density-toggle"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-cyan" />
+            <span>DENSIDAD: {densityMode.toUpperCase()}</span>
+          </button>
+
+          {/* Trigger for Native Popover API */}
+          <button
+            type="button"
+            popoverTarget="hud-matrix-popover"
+            className="px-2.5 py-2 bg-cyan-10 border border-cyan-35 text-cyan rounded cursor-pointer flex items-center gap-1.5 font-bold"
+            id="btn-matrix-popover"
+          >
+            <Radio className="w-3.5 h-3.5" />
+            <span>BASELINE SPEC</span>
+          </button>
           
           <div className="hidden lg:flex flex-col items-end">
-            <span className="text-[#00e5ff] font-bold tabular-nums">ZULU: {currentTime.toUTCString().slice(17, 25)}Z</span>
-            <span className="text-[8px] mt-0.5">LOCAL: {currentTime.toLocaleTimeString('es-ES')}</span>
+            <span className="text-cyan font-bold tabular-nums">ZULU: {currentTime.toUTCString().slice(17, 25)}Z</span>
+            <span className="text-[8px] mt-0.5 tabular-nums">LOCAL: {currentTime.toLocaleTimeString('es-ES')}</span>
           </div>
 
           <button 
-            onClick={fetchWeather} 
-            className="p-2 bg-white/5 hover:bg-[#00e5ff]/10 border border-white/5 hover:border-[#00e5ff]/30 text-slate-300 hover:text-[#00e5ff] rounded transition-all duration-200"
+            type="button"
+            onClick={() => { void fetchWeather(); }} 
+            className="p-2 bg-white/5 border border-white/10 text-slate-300 rounded cursor-pointer transition-all"
             title="Sincronizar Telemetría"
             id="btn-sync-telemetry"
             aria-label="Sincronizar Telemetría"
@@ -484,25 +783,27 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
       <main className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0 w-full">
         
         {/* LEFT COLUMN: Map panel & Layers Control */}
-        <section className="no-print w-full lg:w-[48%] border-r border-white/5 p-6 flex flex-col gap-6 overflow-y-auto">
+        <section className="hud-scroller no-print w-full lg:w-[48%] border-r border-white/5 p-6 flex flex-col gap-6 overflow-y-auto">
           
           {/* Euskadi Vector Map Panel */}
           <div className="hud-panel flex-1 min-h-[550px] flex flex-col justify-between corner-ticks">
             <div className="flex justify-between items-center border-b border-white/5 pb-3">
-              <span className="text-[10px] uppercase font-mono font-bold tracking-widest text-[#00e5ff] flex items-center gap-2">
-                <Activity className="w-3.5 h-3.5 text-[#00e5ff]" />
-                Visualizador de Provincia / Radar
+              <span className="text-[10px] uppercase font-mono font-bold tracking-widest text-cyan flex items-center gap-2">
+                <Activity className="w-3.5 h-3.5 text-cyan" />
+                Visualizador de Provincia / Radar Táctico
               </span>
-              <span className="text-[8px] font-mono text-slate-500 uppercase tracking-widest">MAP REF: 43.26N / 2.67W</span>
+              <span className="text-[8px] font-mono text-slate-500 uppercase tracking-widest tabular-nums">
+                MAP REF: 43.26N / 2.67W
+              </span>
             </div>
 
             {/* Interactive SVG Map */}
             <div className="relative flex-1 flex items-center justify-center p-4 bg-black/35 rounded border border-white/5 my-4 overflow-hidden">
               
               {/* Sci-fi Radar circles */}
-              <div className="absolute w-[540px] h-[540px] rounded-full border border-[#00e5ff]/5 pointer-events-none" />
-              <div className="absolute w-[360px] h-[360px] rounded-full border border-[#00e5ff]/10 pointer-events-none" />
-              <div className="absolute w-[180px] h-[180px] rounded-full border border-[#00e5ff]/5 pointer-events-none" />
+              <div className="absolute w-[540px] h-[540px] rounded-full border border-white/5 pointer-events-none" />
+              <div className="absolute w-[360px] h-[360px] rounded-full border border-cyan/15 pointer-events-none" />
+              <div className="absolute w-[180px] h-[180px] rounded-full border border-white/5 pointer-events-none" />
               
               {/* Radar Sweeper Line */}
               <svg className="absolute inset-0 w-full h-full pointer-events-none radar-sweep" viewBox="0 0 400 300">
@@ -510,12 +811,12 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
               </svg>
 
               {/* Map SVG */}
-              <svg className="w-full max-w-[550px] h-auto drop-shadow-[0_0_15px_rgba(0,229,255,0.05)]" viewBox="0 0 400 330">
+              <svg className="w-full max-w-[550px] h-auto" viewBox="0 0 400 330" role="img" aria-label="Mapa vectorial interactivo de Euskadi">
                 {/* Bizkaia Path */}
                 <path 
                   d="M 50,160 C 65,130 90,115 110,120 C 130,125 140,110 160,112 C 175,115 185,125 190,135 C 200,155 210,165 210,180 C 180,205 140,195 105,195 Z" 
                   className={getProvinceClass('BIZKAIA')}
-                  onClick={() => setSelectedProvince('BIZKAIA')}
+                  onClick={() => handleSelectProvince('BIZKAIA')}
                   id="path-map-bizkaia"
                   aria-label="Provincia de Bizkaia"
                 />
@@ -524,7 +825,7 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                 <path 
                   d="M 190,135 C 210,120 240,125 260,120 C 285,115 315,108 335,110 L 340,130 C 330,145 320,165 310,185 C 290,190 270,180 250,190 C 235,198 220,185 210,180 C 210,165 200,155 190,135 Z" 
                   className={getProvinceClass('GIPUZKOA')}
-                  onClick={() => setSelectedProvince('GIPUZKOA')}
+                  onClick={() => handleSelectProvince('GIPUZKOA')}
                   id="path-map-gipuzkoa"
                   aria-label="Provincia de Gipuzkoa"
                 />
@@ -533,14 +834,13 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                 <path 
                   d="M 105,195 C 140,195 180,205 210,180 C 220,185 235,198 250,190 C 270,180 290,190 310,185 L 290,245 C 275,265 260,285 240,290 C 210,295 180,275 160,285 C 145,290 120,270 115,250 C 110,230 95,215 105,195 Z" 
                   className={getProvinceClass('ARABA')}
-                  onClick={() => setSelectedProvince('ARABA')}
+                  onClick={() => handleSelectProvince('ARABA')}
                   id="path-map-araba"
                   aria-label="Provincia de Araba"
                 />
 
-                {/* Capital Indicators / Glowing markers (Always Visible) */}
                 {/* Bilbao marker */}
-                <g className="cursor-pointer" onClick={() => setSelectedProvince('BIZKAIA')}>
+                <g className="cursor-pointer" onClick={() => handleSelectProvince('BIZKAIA')}>
                   <circle cx="150" cy="160" r="6" fill="#00f5a0" className="animate-ping" style={{ animationDuration: '3s', transformOrigin: 'center', transformBox: 'fill-box' }} />
                   <circle cx="150" cy="160" r="4" fill="#00e5ff" />
                   <text x="150" y="148" textAnchor="middle" fill="#ffffff" fontSize="9" fontFamily="var(--font-mono)">BILBO</text>
@@ -550,7 +850,7 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                 </g>
 
                 {/* Donostia marker */}
-                <g className="cursor-pointer" onClick={() => setSelectedProvince('GIPUZKOA')}>
+                <g className="cursor-pointer" onClick={() => handleSelectProvince('GIPUZKOA')}>
                   <circle cx="270" cy="145" r="6" fill="#00f5a0" className="animate-ping" style={{ animationDuration: '3.5s', transformOrigin: 'center', transformBox: 'fill-box' }} />
                   <circle cx="270" cy="145" r="4" fill="#00e5ff" />
                   <text x="270" y="133" textAnchor="middle" fill="#ffffff" fontSize="9" fontFamily="var(--font-mono)">DONOSTIA</text>
@@ -560,7 +860,7 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                 </g>
 
                 {/* Vitoria-Gasteiz marker */}
-                <g className="cursor-pointer" onClick={() => setSelectedProvince('ARABA')}>
+                <g className="cursor-pointer" onClick={() => handleSelectProvince('ARABA')}>
                   <circle cx="210" cy="245" r="6" fill="#00f5a0" className="animate-ping" style={{ animationDuration: '2.5s', transformOrigin: 'center', transformBox: 'fill-box' }} />
                   <circle cx="210" cy="245" r="4" fill="#00e5ff" />
                   <text x="210" y="233" textAnchor="middle" fill="#ffffff" fontSize="9" fontFamily="var(--font-mono)">GASTEIZ</text>
@@ -572,12 +872,12 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                 {/* Emergency Alert Marks on Map */}
                 {layers.alerts && (
                   <>
-                    <g className="blink-red">
+                    <g className="blink-red cursor-pointer" onClick={() => openEmergencyDialog(alerts[0])}>
                       <circle cx="120" cy="150" r="5" fill="#ff3e6c" />
                       <line x1="120" y1="142" x2="120" y2="158" stroke="#ff3e6c" strokeWidth="1" />
                       <line x1="112" y1="150" x2="128" y2="150" stroke="#ff3e6c" strokeWidth="1" />
                     </g>
-                    <g className="blink-orange">
+                    <g className="blink-orange cursor-pointer" onClick={() => openEmergencyDialog(alerts[1])}>
                       <circle cx="225" cy="230" r="5" fill="#ff9100" />
                     </g>
                   </>
@@ -586,7 +886,6 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                 {/* Wind Vectors on Map */}
                 {layers.wind && (
                   <>
-                    {/* Bilbao wind arrow */}
                     <g transform="translate(150, 160)" className="pointer-events-none">
                       <g transform={`rotate(${capitalsData.bilbao.windDirection})`}>
                         <line x1="0" y1="0" x2="0" y2="-18" stroke="#00f5a0" strokeWidth="2.5" />
@@ -594,7 +893,6 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                       </g>
                       <text x="16" y="4" fill="#00f5a0" fontSize="8" fontWeight="bold" fontFamily="var(--font-mono)">{capitalsData.bilbao.windSpeed} km/h</text>
                     </g>
-                    {/* Donostia wind arrow */}
                     <g transform="translate(270, 145)" className="pointer-events-none">
                       <g transform={`rotate(${capitalsData.donostia.windDirection})`}>
                         <line x1="0" y1="0" x2="0" y2="-18" stroke="#00f5a0" strokeWidth="2" />
@@ -602,7 +900,6 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                       </g>
                       <text x="16" y="4" fill="#00f5a0" fontSize="8" fontWeight="bold" fontFamily="var(--font-mono)">{capitalsData.donostia.windSpeed} km/h</text>
                     </g>
-                    {/* Vitoria wind arrow */}
                     <g transform="translate(210, 245)" className="pointer-events-none">
                       <g transform={`rotate(${capitalsData.vitoria.windDirection})`}>
                         <line x1="0" y1="0" x2="0" y2="-18" stroke="#00f5a0" strokeWidth="2" />
@@ -610,29 +907,27 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                       </g>
                       <text x="16" y="4" fill="#00f5a0" fontSize="8" fontWeight="bold" fontFamily="var(--font-mono)">{capitalsData.vitoria.windSpeed} km/h</text>
                     </g>
-                             {/* Fires Hazard Indicators on Map */}
+                  </>
+                )}
+
+                {/* Fires Hazard Indicators on Map */}
                 {layers.fires && (
                   <>
-                    {/* Gasteiz (Araba) fire risk */}
                     <g transform="translate(210, 275)" className={`${capitalsData.vitoria.fwi >= 25 ? 'blink-orange' : '' } pointer-events-none`}>
                       <circle cx="0" cy="0" r="4" fill={capitalsData.vitoria.fwi >= 25 ? '#ff9100' : '#d4af37'} />
                       {capitalsData.vitoria.fwi >= 25 && (
                         <circle cx="0" cy="0" r="8" stroke="#ff9100" strokeWidth="1" fill="none" className="animate-ping" style={{ animationDuration: '4s' }} />
                       )}
                       <text x="12" y="3" fill={capitalsData.vitoria.fwi >= 25 ? '#ff9100' : '#d4af37'} fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
-                        FWI: {capitalsData.vitoria.fwi} ({capitalsData.vitoria.fwi >= 38 ? 'MUY ALTO' : capitalsData.vitoria.fwi >= 25 ? 'ALTO' : capitalsData.vitoria.fwi >= 12 ? 'MODERADO' : 'BAJO'})
+                        FWI: {capitalsData.vitoria.fwi}
                       </text>
                     </g>
-
-                    {/* Bilbao (Bizkaia) fire risk */}
                     <g transform="translate(130, 185)" className={`${capitalsData.bilbao.fwi >= 25 ? 'blink-orange' : '' } pointer-events-none`}>
                       <circle cx="0" cy="0" r="3.5" fill={capitalsData.bilbao.fwi >= 25 ? '#ff9100' : '#d4af37'} />
                       <text x="10" y="3" fill={capitalsData.bilbao.fwi >= 25 ? '#ff9100' : '#d4af37'} fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
                         FWI: {capitalsData.bilbao.fwi}
                       </text>
                     </g>
-
-                    {/* Donostia (Gipuzkoa) fire risk */}
                     <g transform="translate(250, 165)" className={`${capitalsData.donostia.fwi >= 25 ? 'blink-orange' : '' } pointer-events-none`}>
                       <circle cx="0" cy="0" r="3.5" fill={capitalsData.donostia.fwi >= 25 ? '#ff9100' : '#d4af37'} />
                       <text x="10" y="3" fill={capitalsData.donostia.fwi >= 25 ? '#ff9100' : '#d4af37'} fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
@@ -645,56 +940,48 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                 {/* River levels on Map */}
                 {layers.rivers && (
                   <>
-                    {/* Nervion near Bilbo (Bizkaia) */}
                     <g transform="translate(130, 140)" className="pointer-events-none">
                       <circle cx="0" cy="0" r="3.5" fill="#0099ff" />
                       <text x="-8" y="3" textAnchor="end" fill="#0099ff" fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
                         NERVIÓN: {nervionRiver?.level}m
                       </text>
                     </g>
-                    {/* Zadorra near Gasteiz (Araba) */}
                     <g transform="translate(235, 230)" className={`${zadorraRiver?.status !== 'nominal' ? 'blink-orange' : ''} pointer-events-none`}>
                       <circle cx="0" cy="0" r="3.5" fill={zadorraRiver?.status !== 'nominal' ? '#ff9100' : '#0099ff'} />
                       <text x="8" y="3" textAnchor="start" fill={zadorraRiver?.status !== 'nominal' ? '#ff9100' : '#0099ff'} fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
-                        ZADORRA: {zadorraRiver?.level}m{zadorraRiver?.status !== 'nominal' ? ' [CRÍTICO]' : ''}
+                        ZADORRA: {zadorraRiver?.level}m
                       </text>
                     </g>
-                    {/* Oria near Tolosa (Gipuzkoa) */}
-                    <g transform="translate(280, 170)" className={`${oriaRiver?.status === 'warning' ? 'blink-orange' : ''} pointer-events-none`}>
-                      <circle cx="0" cy="0" r="3.5" fill={oriaRiver?.status === 'warning' ? '#ff9100' : '#0099ff'} />
-                      <text x="8" y="3" textAnchor="start" fill={oriaRiver?.status === 'warning' ? '#ff9100' : '#0099ff'} fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
+                    <g transform="translate(280, 170)" className="pointer-events-none">
+                      <circle cx="0" cy="0" r="3.5" fill="#0099ff" />
+                      <text x="8" y="3" textAnchor="start" fill="#0099ff" fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
                         ORIA: {oriaRiver?.level}m
                       </text>
                     </g>
-                    {/* Deba near Eibar (Gipuzkoa) */}
-                    <g transform="translate(220, 145)" className={`${debaRiver?.status === 'warning' ? 'blink-orange' : ''} pointer-events-none`}>
-                      <circle cx="0" cy="0" r="3.5" fill={debaRiver?.status === 'warning' ? '#ff9100' : '#0099ff'} />
-                      <text x="8" y="3" textAnchor="start" fill={debaRiver?.status === 'warning' ? '#ff9100' : '#0099ff'} fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
+                    <g transform="translate(220, 145)" className="pointer-events-none">
+                      <circle cx="0" cy="0" r="3.5" fill="#0099ff" />
+                      <text x="8" y="3" textAnchor="start" fill="#0099ff" fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
                         DEBA: {debaRiver?.level}m
                       </text>
                     </g>
-                    {/* Urumea near Donostia (Gipuzkoa) */}
-                    <g transform="translate(285, 130)" className={`${urumeaRiver?.status === 'warning' ? 'blink-orange' : ''} pointer-events-none`}>
-                      <circle cx="0" cy="0" r="3.5" fill={urumeaRiver?.status === 'warning' ? '#ff9100' : '#0099ff'} />
-                      <text x="8" y="3" textAnchor="start" fill={urumeaRiver?.status === 'warning' ? '#ff9100' : '#0099ff'} fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
+                    <g transform="translate(285, 130)" className="pointer-events-none">
+                      <circle cx="0" cy="0" r="3.5" fill="#0099ff" />
+                      <text x="8" y="3" textAnchor="start" fill="#0099ff" fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">
                         URUMEA: {urumeaRiver?.level}m
                       </text>
                     </g>
                   </>
-                )}          </>
                 )}
 
                 {/* Tides (Mareas / Olas) on Map */}
                 {layers.tides && (
                   <>
-                    {/* Bilbao / Cabo Matxitxako Buoy (Bizkaia) - Orange Alert (flashing/blinking) */}
                     <g transform="translate(150, 85)" className="blink-orange pointer-events-none">
                       <path d="M -8,-2 C -5,-5 -2,-5 1,-2 C 4,1 7,1 10,-2" stroke="#ff9100" strokeWidth="1.5" fill="none" />
                       <path d="M -8,2 C -5,-1 -2,-1 1,2 C 4,5 7,5 10,2" stroke="#ff9100" strokeWidth="1.5" fill="none" />
                       <text x="14" y="2" textAnchor="start" fill="#ff9100" fontSize="7" fontWeight="bold" fontFamily="var(--font-mono)">BOYA MATXITXAKO: 4.2m [AVISO]</text>
                     </g>
 
-                    {/* Donostia / Pasaia Buoy (Gipuzkoa) - Nominal (purple) */}
                     <g transform="translate(325, 105)" className="pointer-events-none">
                       <path d="M -8,-2 C -5,-5 -2,-5 1,-2 C 4,1 7,1 10,-2" stroke="#d946ef" strokeWidth="1.5" fill="none" />
                       <path d="M -8,2 C -5,-1 -2,-1 1,2 C 4,5 7,5 10,2" stroke="#d946ef" strokeWidth="1.5" fill="none" />
@@ -703,67 +990,50 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                   </>
                 )}
 
-                {/* Geopolitical towns (Poblaciones secundarias) */}
+                {/* Geopolitical towns */}
                 <g opacity="0.45" className="pointer-events-none">
-                  {/* Bizkaia */}
                   <circle cx="138" cy="158" r="2.5" fill="#ffffff" />
                   <text x="133" y="160" textAnchor="end" fill="#ffffff" fontSize="7" fontFamily="var(--font-mono)">BARAKALDO</text>
-                  
                   <circle cx="135" cy="138" r="2.5" fill="#ffffff" />
                   <text x="130" y="139" textAnchor="end" fill="#ffffff" fontSize="7" fontFamily="var(--font-mono)">GETXO</text>
-                  
-                  {/* Gipuzkoa */}
                   <circle cx="315" cy="120" r="2.5" fill="#ffffff" />
                   <text x="315" y="114" textAnchor="middle" fill="#ffffff" fontSize="7" fontFamily="var(--font-mono)">IRUN</text>
-                  
                   <circle cx="210" cy="155" r="2.5" fill="#ffffff" />
                   <text x="205" y="157" textAnchor="end" fill="#ffffff" fontSize="7" fontFamily="var(--font-mono)">EIBAR</text>
-                  
-                  {/* Araba */}
                   <circle cx="128" cy="208" r="2.5" fill="#ffffff" />
                   <text x="123" y="210" textAnchor="end" fill="#ffffff" fontSize="7" fontFamily="var(--font-mono)">LAUDIO</text>
-                  
                   <circle cx="255" cy="245" r="2.5" fill="#ffffff" />
                   <text x="260" y="247" textAnchor="start" fill="#ffffff" fontSize="7" fontFamily="var(--font-mono)">AGURAIN</text>
                 </g>
 
-                {/* Mountain Summits (Cumbres importantes - Triángulos dorados) */}
+                {/* Mountain Summits */}
                 <g className="pointer-events-none">
-                  {/* Gorbeia (Highest of Bizkaia & Araba - Shared) */}
                   <polygon points="170,204 166,212 174,212" fill="#d4af37" />
                   <text x="170" y="221" textAnchor="middle" fill="#d4af37" fontSize="6.5" fontWeight="bold" fontFamily="var(--font-mono)">GORBEIA (1482m)</text>
-                  
-                  {/* Anboto (Bizkaia Interior) */}
                   <polygon points="185,190 181,198 189,198" fill="#d4af37" />
                   <text x="185" y="206" textAnchor="middle" fill="#d4af37" fontSize="6.5" fontWeight="bold" fontFamily="var(--font-mono)">ANBOTO (1331m)</text>
-
-                  {/* Aketegi (Highest Peak of Gipuzkoa & Basque Country) */}
                   <polygon points="250,204 246,212 254,212" fill="#d4af37" />
                   <text x="250" y="221" textAnchor="middle" fill="#d4af37" fontSize="6.5" fontWeight="bold" fontFamily="var(--font-mono)">AKETEGI (1551m)</text>
-
-                  {/* Aizkorri (Iconic Gipuzkoa Summit) */}
                   <polygon points="264,190 260,198 268,198" fill="#d4af37" />
                   <text x="264" y="181" textAnchor="middle" fill="#d4af37" fontSize="6.5" fontWeight="bold" fontFamily="var(--font-mono)">AIZKORRI (1528m)</text>
-                  
-                  {/* Toloño (Iconic Araba Southern Summit) */}
                   <polygon points="190,289 186,297 194,297" fill="#d4af37" />
                   <text x="190" y="305" textAnchor="middle" fill="#d4af37" fontSize="6.5" fontWeight="bold" fontFamily="var(--font-mono)">TOLOÑO (1271m)</text>
                 </g>
               </svg>
-
-
             </div>
 
             {/* Quick Province Selector buttons */}
             <div className="flex gap-2 justify-center font-mono text-[9px] uppercase tracking-wider">
               {['ALL', 'BIZKAIA', 'GIPUZKOA', 'ARABA'].map(prov => (
                 <button
+                  type="button"
                   key={prov}
-                  onClick={() => setSelectedProvince(prov)}
-                  className={`px-3 py-1.5 rounded border transition-all ${
+                  onClick={() => handleSelectProvince(prov)}
+                  aria-pressed={selectedProvince === prov}
+                  className={`px-3 py-1.5 rounded border transition-all cursor-pointer ${
                     selectedProvince === prov 
-                      ? 'bg-[#00e5ff]/15 border-[#00e5ff]/50 text-[#00e5ff] font-bold shadow-[0_0_10px_rgba(0,229,255,0.15)]'
-                      : 'bg-white/5 border-white/5 text-slate-400 hover:text-white hover:bg-white/10'
+                      ? 'bg-cyan-10 border-cyan-35 text-cyan font-bold shadow-cyan-glow'
+                      : 'bg-white/5 border-white/5 text-slate-400'
                   }`}
                   id={`btn-prov-${prov.toLowerCase()}`}
                   aria-label={`Seleccionar provincia ${prov}`}
@@ -774,139 +1044,191 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
             </div>
           </div>
 
-          {/* Toggle Layers controller panel */}
+          {/* =====================================================================
+              MODERN WEB GUIDANCE (`switch`): Accessible <input type="checkbox" switch>
+              with associated <label> instead of non-accessible clickable <div>s
+              ===================================================================== */}
           <div className="hud-panel corner-ticks">
-            <h3 className="text-[10px] font-mono font-bold tracking-widest text-[#d4af37] border-b border-white/5 pb-2 mb-3">
-              CAPAS DEL MAPA // LAYERS
+            <h3 className="text-[10px] font-mono font-bold tracking-widest text-gold border-b border-white/5 pb-2 mb-3">
+              CAPAS DEL MAPA // NATIVE SWITCH CONTROLS
             </h3>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-2 gap-3 text-[9px] font-mono tracking-wider">
-              {Object.keys(layers).map((layerKey) => (
-                <div 
-                  key={layerKey}
-                  onClick={() => setLayers(prev => ({ ...prev, [layerKey]: !prev[layerKey as keyof typeof layers] }))}
-                  className={`p-2.5 rounded border cursor-pointer transition-all flex items-center justify-between ${
-                    layers[layerKey as keyof typeof layers]
-                      ? getLayerActiveClasses(layerKey)
-                      : 'bg-black/20 border-white/5 text-slate-500 hover:text-slate-400'
-                  }`}
-                  id={`layer-${layerKey}`}
-                >
-                  <span>{layerKey.toUpperCase()}</span>
-                  <div className={`w-1.5 h-1.5 rounded-full ${layers[layerKey as keyof typeof layers] ? getLayerDotClass(layerKey) : 'bg-slate-700'}`} />
-                </div>
-              ))}
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-2 gap-3">
+              {Object.keys(layers).map((layerKey) => {
+                const isChecked = layers[layerKey as keyof typeof layers];
+                return (
+                  <label
+                    key={layerKey}
+                    htmlFor={`layer-switch-${layerKey}`}
+                    className="hud-layer-label"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${isChecked ? getLayerDotClass(layerKey) : 'bg-slate-500'}`} />
+                      <span>{layerKey.toUpperCase()}</span>
+                    </span>
+                    <input
+                      id={`layer-switch-${layerKey}`}
+                      type="checkbox"
+                      {...({ switch: '' } as Record<string, string>)}
+                      checked={isChecked}
+                      onChange={(e) =>
+                        setLayers(prev => ({ ...prev, [layerKey]: e.target.checked }))
+                      }
+                      className="hud-switch-input"
+                    />
+                  </label>
+                );
+              })}
             </div>
           </div>
 
         </section>
 
         {/* RIGHT COLUMN: Tab Panel and Details */}
-        <section className="w-full lg:w-[52%] p-6 flex flex-col gap-6 overflow-y-auto">
+        <section className="hud-scroller w-full lg:w-[52%] p-6 flex flex-col gap-6 overflow-y-auto">
           
-          {/* Navigation Menu / Tabs */}
-          <nav className="no-print flex flex-wrap gap-2 font-mono text-[9px] tracking-widest uppercase">
-            {[
-              { id: 'meteo', label: 'EGU / El Tiempo', icon: Sun },
-              { id: 'tides', label: 'MAR / Tides & Moon', icon: Waves },
-              { id: 'fire', label: 'SUT / Incendios', icon: Flame },
-              { id: 'hydro', label: 'URA / Ríos', icon: Droplet },
-              { id: 'alerts', label: `ALERTAK (${alerts.filter(a => a.active).length})`, icon: AlertTriangle, status: 'alert' },
-              { id: 'report', label: 'TXO / Informes', icon: Printer }
-            ].map(tab => {
+          {/* =====================================================================
+              MODERN WEB GUIDANCE (`tabs`):
+              - `focusgroup="tablist nomemory"` + `role="tablist"`
+              - `[aria-selected="true"]::after` 3px non-color underline shape
+              - Scroll-driven edge fades via registered `@property --fade-start`
+              ===================================================================== */}
+          <div
+            role="tablist"
+            aria-label="Módulos de telemetría ambiental de Euskadi"
+            {...({ focusgroup: 'tablist nomemory' } as Record<string, string>)}
+            className="hud-tablist no-print"
+          >
+            {tabsConfig.map(tab => {
               const Icon = tab.icon;
+              const isSelected = activeTab === tab.id;
               return (
                 <button
+                  type="button"
+                  role="tab"
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id as any)}
-                  className={`flex items-center gap-2 px-3 py-2.5 rounded border transition-all ${
-                    activeTab === tab.id
-                      ? tab.status === 'alert'
-                        ? 'bg-[#ff3e6c]/15 border-[#ff3e6c]/50 text-[#ff3e6c] font-bold shadow-[0_0_10px_rgba(255,62,108,0.2)]'
-                        : 'bg-[#00e5ff]/15 border-[#00e5ff]/50 text-[#00e5ff] font-bold shadow-[0_0_10px_rgba(0,229,255,0.2)]'
-                      : tab.status === 'alert'
-                        ? 'bg-[#ff3e6c]/5 border-[#ff3e6c]/25 text-[#ff3e6c]/80 hover:bg-[#ff3e6c]/15 hover:text-white blink-red'
-                        : 'bg-white/5 border-white/5 text-slate-400 hover:text-white hover:bg-white/10'
-                  }`}
                   id={`tab-${tab.id}`}
-                  aria-label={tab.label}
+                  aria-selected={isSelected}
+                  data-alert={tab.status === 'alert' ? 'true' : undefined}
+                  {...(isSelected ? ({ focusgroupstart: '' } as Record<string, string>) : {})}
+                  onClick={(e) => handleSelectTab(tab.id, e.currentTarget)}
+                  className="hud-tab"
                 >
-                  <Icon className="w-3.5 h-3.5" />
+                  <Icon className="w-3.5 h-3.5 shrink-0" />
                   <span>{tab.label}</span>
                 </button>
               );
             })}
-          </nav>
+          </div>
 
-          {/* DYNAMIC TELEMETRY DISPLAY */}
-          <div className="flex-1 min-h-[300px] flex flex-col">
+          {/* Active Stage Heading target for accessible focus routing after View Transition */}
+          <div className="flex items-center justify-between border-b border-white/10 pb-2">
+            <h2
+              ref={stageHeadingRef}
+              tabIndex={-1}
+              className="text-xs font-mono font-bold uppercase tracking-widest text-cyan"
+            >
+              MÓDULO ACTIVO: {activeTabMeta.label} {selectedProvince !== 'ALL' ? `// ${selectedProvince}` : '// EUSKADI GLOBAL'}
+            </h2>
+            <span className="text-[8px] font-mono text-slate-400 uppercase">
+              CTRL+F SEARCHABLE PANELS (hidden=&quot;until-found&quot;)
+            </span>
+          </div>
+
+          {/* =====================================================================
+              MODERN WEB GUIDANCE (`tabs` + `same-document-transitions`):
+              All tabpanels rendered in a single-cell grid stack with `hidden="until-found"`
+              on inactive panels and `onBeforeMatch` to activate when matched by Find-in-Page!
+              ===================================================================== */}
+          <div className="hud-active-stage hud-tabpanels-stack flex-1">
             
             {/* 1. WEATHER & CLIMATE MODULE */}
-            {activeTab === 'meteo' && (
-              <div className="flex flex-col gap-6 fade-in">
+            <div
+              role="tabpanel"
+              id="panel-meteo"
+              aria-labelledby="tab-meteo"
+              tabIndex={activeTab === 'meteo' ? 0 : undefined}
+              {...(activeTab !== 'meteo' ? ({ hidden: 'until-found' } as Record<string, string>) : {})}
+              ref={(el) => {
+                if (!el) return;
+                el.onbeforematch = () => setActiveTab('meteo');
+              }}
+              className="hud-tabpanel"
+            >
+              <div className="flex flex-col gap-4">
                 {Object.keys(capitalsData).map(key => {
                   const data = capitalsData[key];
                   if (selectedProvince !== 'ALL' && selectedProvince !== data.province) return null;
                   
                   return (
-                    <div key={key} className="hud-panel corner-ticks flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
-                      <div className="flex items-center gap-3">
-                        <div className="p-3 bg-white/5 rounded border border-white/5">
-                          {getWeatherIcon(data.weatherCode)}
-                        </div>
-                        <div>
-                          <h4 className="text-sm font-bold text-white font-mono uppercase">{data.name} ({data.basqueName})</h4>
-                          <span className="text-[9px] text-[#00e5ff] font-mono tracking-widest uppercase">{data.province} // CAPTURA OK</span>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-6 font-mono w-full md:w-auto">
-                        <div className="flex flex-col border-l border-white/5 pl-4">
-                          <span className="text-[7px] text-slate-500 uppercase">Temperatura</span>
-                          <span className="text-xl font-bold text-white tabular-nums">{data.temp}°C</span>
-                          <span className="text-[7px] text-slate-400">SENS: {data.apparentTemp}°C</span>
+                    <div key={key} className="capital-card-container">
+                      <div className="hud-panel corner-ticks capital-card-layout">
+                        <div className="flex items-center gap-3">
+                          <div className="p-3 bg-white/5 rounded border border-white/5">
+                            {getWeatherIcon(data.weatherCode)}
+                          </div>
+                          <div>
+                            <h4 className="text-sm font-bold text-white font-mono uppercase">{data.name} ({data.basqueName})</h4>
+                            <span className="text-[9px] text-cyan font-mono tracking-widest uppercase">{data.province} // CAPTURA OK</span>
+                          </div>
                         </div>
 
-                        <div className="flex flex-col border-l border-white/5 pl-4">
-                          <span className="text-[7px] text-slate-500 uppercase">Humedad Rel</span>
-                          <span className="text-xl font-bold text-[#00f5a0] tabular-nums">{data.humidity}%</span>
-                          <span className="text-[7px] text-slate-400">ESTADO: SECO</span>
-                        </div>
+                        <div className="capital-metrics-grid font-mono">
+                          <div className="flex flex-col border-l border-white/10 pl-4">
+                            <span className="text-[7px] text-slate-500 uppercase">Temperatura</span>
+                            <span className="text-xl font-bold text-white tabular-nums">{data.temp}°C</span>
+                            <span className="text-[7px] text-slate-400 tabular-nums">SENS: {data.apparentTemp}°C</span>
+                          </div>
 
-                        <div className="flex flex-col border-l border-white/5 pl-4">
-                          <span className="text-[7px] text-slate-500 uppercase">Vel. Viento</span>
-                          <span className="text-xl font-bold text-[#00e5ff] tabular-nums">{data.windSpeed} km/h</span>
-                          <span className="text-[7px] text-slate-400 flex items-center gap-1">
-                            <Compass className="w-2.5 h-2.5 animate-spin" style={{ animationDuration: '10s' }} /> DIR: {data.windDirection}°
-                          </span>
-                        </div>
+                          <div className="flex flex-col border-l border-white/10 pl-4">
+                            <span className="text-[7px] text-slate-500 uppercase">Humedad Rel</span>
+                            <span className="text-xl font-bold text-green tabular-nums">{data.humidity}%</span>
+                            <span className="text-[7px] text-slate-400">ESTADO: {data.humidity < 40 ? 'SECO' : 'ÓPTIMO'}</span>
+                          </div>
 
-                        <div className="flex flex-col border-l border-white/5 pl-4">
-                          <span className="text-[7px] text-slate-500 uppercase">Cielo / Zerua</span>
-                          <span className="text-[10px] font-bold text-slate-200 uppercase mt-1 truncate max-w-[100px]">{getWeatherDesc(data.weatherCode)}</span>
+                          <div className="flex flex-col border-l border-white/10 pl-4">
+                            <span className="text-[7px] text-slate-500 uppercase">Vel. Viento</span>
+                            <span className="text-xl font-bold text-cyan tabular-nums">{data.windSpeed} km/h</span>
+                            <span className="text-[7px] text-slate-400 flex items-center gap-1 tabular-nums">
+                              <Compass className="w-2.5 h-2.5" /> DIR: {data.windDirection}°
+                            </span>
+                          </div>
+
+                          <div className="flex flex-col border-l border-white/10 pl-4">
+                            <span className="text-[7px] text-slate-500 uppercase">Cielo / Zerua</span>
+                            <span className="text-[10px] font-bold text-slate-200 uppercase mt-1">{getWeatherDesc(data.weatherCode)}</span>
+                          </div>
                         </div>
                       </div>
                     </div>
                   );
                 })}
               </div>
-            )}
+            </div>
 
             {/* 2. TIDES & ASTRONOMICAL EVENTS */}
-            {activeTab === 'tides' && (
-              <div className="flex flex-col gap-6 fade-in">
-                
-                {/* Real-time Tide telemetry */}
+            <div
+              role="tabpanel"
+              id="panel-tides"
+              aria-labelledby="tab-tides"
+              tabIndex={activeTab === 'tides' ? 0 : undefined}
+              {...(activeTab !== 'tides' ? ({ hidden: 'until-found' } as Record<string, string>) : {})}
+              ref={(el) => {
+                if (!el) return;
+                el.onbeforematch = () => setActiveTab('tides');
+              }}
+              className="hud-tabpanel"
+            >
+              <div className="flex flex-col gap-6">
                 <div className="hud-panel corner-ticks grid grid-cols-1 md:grid-cols-3 gap-6">
-                  
                   <div className="flex flex-col justify-between">
                     <div>
-                      <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#00e5ff] border-b border-white/5 pb-2 mb-3">
+                      <h4 className="text-[10px] font-mono font-bold tracking-widest text-cyan border-b border-white/5 pb-2 mb-3">
                         SENSOR MAREA // COASTAL TIDES
                       </h4>
                       <span className="text-[8px] text-slate-500 font-mono uppercase block mb-1">Altura Estimada</span>
                       <span className="text-3xl font-mono font-bold text-white tabular-nums">{tide.height}m</span>
                     </div>
-                    <span className="text-[8px] font-mono text-[#00f5a0] mt-2 block">{tide.state.toUpperCase()}</span>
+                    <span className="text-[8px] font-mono text-green mt-2 block">{tide.state.toUpperCase()}</span>
                   </div>
 
                   <div className="flex flex-col justify-between border-l border-white/5 pl-6">
@@ -915,7 +1237,7 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                         DIRECCIÓN / TENDENCIA
                       </h4>
                       <span className="text-[8px] text-slate-500 font-mono uppercase block mb-1">Marea Flujo</span>
-                      <span className="text-xl font-mono font-bold text-[#00e5ff]">{tide.trend.toUpperCase()}</span>
+                      <span className="text-xl font-mono font-bold text-cyan">{tide.trend.toUpperCase()}</span>
                     </div>
                     <span className="text-[8px] font-mono text-slate-400 mt-2 block">CICLO PERIÓDICO 12.42H</span>
                   </div>
@@ -928,91 +1250,92 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                       <div className="flex flex-col gap-2 font-mono text-[9px]">
                         <div className="flex justify-between">
                           <span className="text-slate-500">PLEAMAR (HIGH TIDE):</span>
-                          <span className="text-[#00f5a0] font-bold">En {tide.nextHigh}</span>
+                          <span className="text-green font-bold tabular-nums">En {tide.nextHigh}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-slate-500">BAJAMAR (LOW TIDE):</span>
-                          <span className="text-[#ff3e6c] font-bold">En {tide.nextLow}</span>
+                          <span className="text-red font-bold tabular-nums">En {tide.nextLow}</span>
                         </div>
                       </div>
                     </div>
                     <span className="text-[7px] text-slate-500 font-mono block">MEDICIÓN: ESTACIÓN PUERTO BILBAO</span>
                   </div>
-
                 </div>
 
-                {/* Astronomy panel (Sunrise / Sunset / Moon) */}
                 <div className="hud-panel corner-ticks grid grid-cols-1 md:grid-cols-2 gap-6">
-                  
-                  {/* Moon phase calculator display */}
                   <div className="flex flex-col gap-3">
-                    <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#d4af37] border-b border-white/5 pb-2 mb-2">
+                    <h4 className="text-[10px] font-mono font-bold tracking-widest text-gold border-b border-white/5 pb-2 mb-2">
                       FASES LUNARES // ILARGI FASEA
                     </h4>
                     <div className="flex items-center gap-4 bg-black/25 border border-white/5 p-3 rounded">
-                      <Moon className="w-10 h-10 text-slate-300 drop-shadow-[0_0_6px_rgba(255,255,255,0.2)] animate-pulse" />
+                      <Moon className="w-10 h-10 text-slate-300 animate-pulse" />
                       <div>
                         <span className="text-xs font-bold text-white font-mono">{moon.label}</span>
-                        <span className="text-[8px] text-slate-500 font-mono block uppercase mt-0.5">Edad del Ciclo: {Math.round(moon.phase * 100)}%</span>
+                        <span className="text-[8px] text-slate-500 font-mono block uppercase mt-0.5 tabular-nums">
+                          Edad del Ciclo: {Math.round(moon.phase * 100)}%
+                        </span>
                       </div>
                     </div>
-                    <p className="text-[9px] text-slate-400 leading-normal">
-                      * El ciclo lunar afecta el rango de las mareas. Las mareas vivas ocurren cerca de la Luna Nueva e Ilbetea (Luna Llena).
+                    <p className="text-[9px] text-slate-400">
+                      * Las mareas vivas (Sizigia) ocurren cerca de la Luna Nueva (Ilberria) e Ilbetea (Luna Llena).
                     </p>
                   </div>
 
-                  {/* Solar Cycle Times */}
                   <div className="flex flex-col gap-3">
-                    <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#d4af37] border-b border-white/5 pb-2 mb-2">
+                    <h4 className="text-[10px] font-mono font-bold tracking-widest text-gold border-b border-white/5 pb-2 mb-2">
                       CICLO SOLAR // EGUR-ARGIA
                     </h4>
                     <div className="flex flex-col gap-2 font-mono text-[9px]">
                       <div className="flex justify-between bg-black/25 border border-white/5 p-2 rounded items-center">
                         <span className="text-slate-400">SALIDA DEL SOL (ORTO):</span>
-                        <span className="text-yellow-400 font-bold text-xs">{capitalsData.vitoria.sunrise}</span>
+                        <span className="text-gold font-bold text-xs tabular-nums">{capitalsData.vitoria.sunrise}</span>
                       </div>
                       <div className="flex justify-between bg-black/25 border border-white/5 p-2 rounded items-center">
                         <span className="text-slate-400">PUESTA DEL SOL (OCASO):</span>
-                        <span className="text-orange-500 font-bold text-xs">{capitalsData.vitoria.sunset}</span>
+                        <span className="text-orange font-bold text-xs tabular-nums">{capitalsData.vitoria.sunset}</span>
                       </div>
                     </div>
                   </div>
-
                 </div>
-
               </div>
-            )}
+            </div>
 
             {/* 3. FIRE RISK & WIND SPEED */}
-            {activeTab === 'fire' && (
-              <div className="flex flex-col gap-6 fade-in">
-                
-                {/* Fire weather index proxy metrics */}
+            <div
+              role="tabpanel"
+              id="panel-fire"
+              aria-labelledby="tab-fire"
+              tabIndex={activeTab === 'fire' ? 0 : undefined}
+              {...(activeTab !== 'fire' ? ({ hidden: 'until-found' } as Record<string, string>) : {})}
+              ref={(el) => {
+                if (!el) return;
+                el.onbeforematch = () => setActiveTab('fire');
+              }}
+              className="hud-tabpanel"
+            >
+              <div className="flex flex-col gap-6">
                 <div className="hud-panel corner-ticks">
-                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#ff3e6c] border-b border-white/5 pb-2 mb-4 flex items-center gap-2">
-                    <Flame className="w-4 h-4 text-[#ff3e6c]" />
-                    ÍNDICE DE RIESGO DE INCENDIOS (COPERNICUS FWI MOCK)
+                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-red border-b border-white/5 pb-2 mb-4 flex items-center gap-2">
+                    <Flame className="w-4 h-4 text-red" />
+                    ÍNDICE DE RIESGO DE INCENDIOS (COPERNICUS EFFIS FWI)
                   </h4>
                   
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     {Object.keys(capitalsData).map(key => {
                       const data = capitalsData[key];
                       if (selectedProvince !== 'ALL' && selectedProvince !== data.province) return null;
-                      
                       const isDanger = data.fwi >= 25;
 
                       return (
                         <div key={key} className="bg-black/25 border border-white/5 p-4 rounded flex flex-col justify-between font-mono">
                           <span className="text-xs font-bold text-white">{data.name}</span>
-                          
                           <div className="my-3">
                             <span className="text-[7px] text-slate-500 uppercase block">Calculated FWI</span>
-                            <span className={`text-2xl font-bold ${isDanger ? 'text-[#ff3e6c]' : 'text-[#00f5a0]'}`}>{data.fwi}</span>
+                            <span className={`text-2xl font-bold tabular-nums ${isDanger ? 'text-red' : 'text-green'}`}>{data.fwi}</span>
                           </div>
-
                           <div className="border-t border-white/5 pt-2 mt-2">
                             <span className="text-[8px] text-slate-400 uppercase">RIESGO:</span>
-                            <span className={`text-[9px] font-bold uppercase ml-2 ${isDanger ? 'text-[#ff3e6c]' : 'text-[#00f5a0]'}`}>{data.fwiCategory}</span>
+                            <span className={`text-[9px] font-bold uppercase ml-2 ${isDanger ? 'text-red' : 'text-green'}`}>{data.fwiCategory}</span>
                           </div>
                         </div>
                       );
@@ -1020,377 +1343,304 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
                   </div>
                 </div>
 
-                {/* Winds detailed telemetry */}
                 <div className="hud-panel corner-ticks">
-                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#00e5ff] border-b border-white/5 pb-2 mb-4 flex items-center gap-2">
-                    <Wind className="w-4 h-4 text-[#00e5ff]" />
+                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-cyan border-b border-white/5 pb-2 mb-4 flex items-center gap-2">
+                    <Wind className="w-4 h-4 text-cyan" />
                     VECTOR DIRECCIÓN Y FUERZA DEL VIENTO
                   </h4>
                   
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     {Object.keys(capitalsData).map(key => {
                       const data = capitalsData[key];
                       if (selectedProvince !== 'ALL' && selectedProvince !== data.province) return null;
-                      
                       const isHighWind = data.windSpeed >= 50;
 
                       return (
                         <div key={key} className="bg-black/25 border border-white/5 p-4 rounded flex flex-col items-center justify-between font-mono">
-                          <span className="text-xs font-bold text-white self-start">{data.name}</span>
-                          
-                          {/* Wind compass vector indicator */}
-                          <div className="relative w-20 h-20 border border-white/5 rounded-full my-4 flex items-center justify-center">
-                            <div className="absolute text-[6px] text-slate-500 top-1">N</div>
-                            <div className="absolute text-[6px] text-slate-500 bottom-1">S</div>
-                            <div className="absolute text-[6px] text-slate-500 left-1">W</div>
-                            <div className="absolute text-[6px] text-slate-500 right-1">E</div>
-                            
-                            {/* Direction pointer arrow */}
-                            <div 
-                              className="transition-transform duration-500 flex items-center justify-center" 
-                              style={{ transform: `rotate(${data.windDirection}deg)` }}
-                            >
-                              <svg 
-                                width="44" 
-                                height="44" 
-                                viewBox="0 0 24 24" 
-                                fill="none" 
-                                className="filter drop-shadow-[0_0_8px_rgba(0,229,255,0.7)]"
-                              >
-                                <defs>
-                                  <linearGradient id={`arrow-grad-${key}`} x1="0%" y1="100%" x2="0%" y2="0%">
-                                    <stop offset="0%" stopColor="rgba(0, 229, 255, 0.1)" />
-                                    <stop offset="100%" stopColor="#00e5ff" />
-                                  </linearGradient>
-                                </defs>
-                                <line 
-                                  x1="12" 
-                                  y1="20" 
-                                  x2="12" 
-                                  y2="4" 
-                                  stroke={`url(#arrow-grad-${key})`} 
-                                  strokeWidth="2.5" 
-                                  strokeLinecap="round" 
-                                />
-                                <path 
-                                  d="M7 9L12 3L17 9" 
-                                  stroke="#00e5ff" 
-                                  strokeWidth="2.5" 
-                                  strokeLinecap="round" 
-                                  strokeLinejoin="round" 
-                                />
-                                <circle cx="12" cy="12" r="2.5" fill="#00e5ff" />
-                              </svg>
-                            </div>
+                          <span className="text-xs font-bold text-white">{data.name} ({data.windDirection}°)</span>
+                          <div className="my-3 text-xl font-bold text-cyan tabular-nums">
+                            {data.windSpeed} km/h
                           </div>
-
                           <div className="w-full flex justify-between border-t border-white/5 pt-2">
-                            <span className="text-[8px] text-slate-500 uppercase">FUERZA:</span>
-                            <span className={`text-[9px] font-bold ${isHighWind ? 'text-[#ff3e6c] blink-red' : 'text-[#00f5a0]'}`}>{data.windSpeed} km/h</span>
+                            <span className="text-[8px] text-slate-500 uppercase">ESTADO:</span>
+                            <span className={`text-[9px] font-bold ${isHighWind ? 'text-red blink-red' : 'text-green'}`}>
+                              {isHighWind ? 'VENDAVAL' : 'OPERATIVO'}
+                            </span>
                           </div>
                         </div>
                       );
                     })}
                   </div>
                 </div>
-
               </div>
-            )}
+            </div>
 
-            {/* 4. RIVERS & RESERVOIRS */}
-            {activeTab === 'hydro' && (
-              <div className="flex flex-col gap-6 fade-in">
-                
-                {/* River telemetry list */}
+            {/* 4. RIVERS & RESERVOIRS (MODERN WEB GUIDANCE: `responsive-table`) */}
+            <div
+              role="tabpanel"
+              id="panel-hydro"
+              aria-labelledby="tab-hydro"
+              tabIndex={activeTab === 'hydro' ? 0 : undefined}
+              {...(activeTab !== 'hydro' ? ({ hidden: 'until-found' } as Record<string, string>) : {})}
+              ref={(el) => {
+                if (!el) return;
+                el.onbeforematch = () => setActiveTab('hydro');
+              }}
+              className="hud-tabpanel"
+            >
+              <div className="flex flex-col gap-6">
                 <div className="hud-panel corner-ticks">
-                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#00e5ff] border-b border-white/5 pb-2 mb-4 flex items-center gap-2">
-                    <Droplet className="w-4 h-4 text-[#00e5ff]" />
-                    RED HIDROGRÁFICA // RIVER FLUCTUATION FLOWS
+                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-cyan border-b border-white/5 pb-2 mb-4 flex items-center gap-2">
+                    <Droplet className="w-4 h-4 text-cyan" />
+                    RED HIDROGRÁFICA URA // TABLA SEMÁNTICA ADAPTATIVA (@container)
                   </h4>
-                  
-                  <div className="flex flex-col gap-3 font-mono text-[9px]">
-                    <div className="grid grid-cols-5 text-slate-500 uppercase tracking-widest border-b border-white/5 pb-2">
-                      <span>Río / Sensor</span>
-                      <span>Provincia</span>
-                      <span>Nivel (m)</span>
-                      <span>Caudal (m³/s)</span>
-                      <span>Estado</span>
-                    </div>
 
-                    {rivers.map(river => {
-                      if (selectedProvince !== 'ALL' && selectedProvince !== river.province) return null;
-                      
-                      const isWarning = river.status === 'warning' || river.level >= river.criticalLevel * 0.8;
-                      const isAlert = river.status === 'alert' || river.level >= river.criticalLevel;
+                  <div
+                    tabIndex={0}
+                    role="region"
+                    aria-labelledby="ura-rivers-caption"
+                    className="hud-table-region hud-scroller"
+                  >
+                    <table className="hud-table">
+                      <caption id="ura-rivers-caption">
+                         Telemetría de Estaciones de Aforo Hidrográfico de Euskadi (URA)
+                      </caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Estación / Río</th>
+                          <th scope="col">Territorio</th>
+                          <th scope="col">Nivel / Umbral</th>
+                          <th scope="col">Caudal</th>
+                          <th scope="col">Estado</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rivers.map(river => {
+                          if (selectedProvince !== 'ALL' && selectedProvince !== river.province) return null;
+                          const isWarning = river.status === 'warning' || river.level >= river.criticalLevel * 0.8;
+                          const isAlert = river.status === 'alert' || river.level >= river.criticalLevel;
 
-                      return (
-                        <div key={river.id} className="grid grid-cols-5 py-2.5 border-b border-white/5 items-center">
-                          <span className="text-white font-bold">{river.name}</span>
-                          <span className="text-slate-400">{river.province}</span>
-                          <span className="text-white font-bold tabular-nums">
-                            {river.level}m 
-                            <span className="text-[7px] text-slate-500 font-normal block">LIM: {river.criticalLevel}m</span>
-                          </span>
-                          <span className="text-[#00e5ff] font-bold tabular-nums">{river.flow} m³/s</span>
-                          
-                          <span className={`px-2 py-0.5 rounded text-[8px] font-bold text-center uppercase max-w-[80px] ${
-                            isAlert 
-                              ? 'bg-[#ff3e6c]/10 border border-[#ff3e6c]/20 text-[#ff3e6c] blink-red'
-                              : isWarning 
-                                ? 'bg-[#ff9100]/10 border border-[#ff9100]/20 text-[#ff9100] blink-orange'
-                                : 'bg-[#00f5a0]/10 border border-[#00f5a0]/20 text-[#00f5a0]'
-                          }`}>
-                            {isAlert ? 'CRÍTICO' : isWarning ? 'ALERTA' : 'NOMINAL'}
-                          </span>
-                        </div>
-                      );
-                    })}
+                          return (
+                            <tr key={river.id}>
+                              <th scope="row">{river.name}</th>
+                              <td className="text-slate-300">{river.province}</td>
+                              <td className="text-white font-bold">
+                                {river.level}m <span className="text-slate-500 text-[9px]">(Lím: {river.criticalLevel}m)</span>
+                              </td>
+                              <td className="text-cyan font-bold">{river.flow} m³/s</td>
+                              <td>
+                                <span className={`px-2 py-1 rounded text-[9px] font-bold uppercase ${
+                                  isAlert
+                                    ? 'bg-red-10 border border-red-35 text-red blink-red'
+                                    : isWarning
+                                      ? 'bg-orange-10 border border-orange-35 text-orange blink-orange'
+                                      : 'bg-green-10 border border-green-35 text-green'
+                                }`}>
+                                  {isAlert ? 'CRÍTICO' : isWarning ? 'ALERTA' : 'NOMINAL'}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
 
                 {/* Reservoir levels capacity */}
                 <div className="hud-panel corner-ticks">
-                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#00e5ff] border-b border-white/5 pb-2 mb-4">
+                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-cyan border-b border-white/5 pb-2 mb-4">
                     RESERVAS HIDROGRÁFICAS // EMBALSES
                   </h4>
                   
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 font-mono">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 font-mono">
                     {reservoirs.map(res => {
                       if (selectedProvince !== 'ALL' && selectedProvince !== res.province) return null;
-
                       return (
                         <div key={res.name} className="bg-black/25 border border-white/5 p-4 rounded flex flex-col gap-3">
                           <div className="flex justify-between items-start">
                             <span className="text-white font-bold">{res.name}</span>
                             <span className="text-[7px] text-slate-500 uppercase">{res.province}</span>
                           </div>
-
                           <div>
-                            <div className="flex justify-between text-[9px] mb-1">
+                            <div className="flex justify-between text-[9px] mb-1 tabular-nums">
                               <span className="text-slate-500">CAPACIDAD:</span>
                               <span className="text-white font-bold">{res.currentLevel} / {res.capacity} hm³</span>
                             </div>
-                            
-                            {/* Graphic progress bar */}
-                            <div className="relative w-full h-2.5 bg-black/45 border border-white/5 rounded-full overflow-hidden">
-                              <div 
-                                className="h-full bg-gradient-to-r from-[#00e5ff] to-[#00f5a0] rounded-full" 
-                                style={{ width: `${res.percentage}%` }}
-                              />
-                            </div>
-                            
-                            <span className="text-[#00f5a0] text-[10px] font-bold block text-right mt-1.5">{res.percentage}% LLENO</span>
+                            <span className="text-green text-xs font-bold block text-right mt-1 tabular-nums">{res.percentage}% LLENO</span>
                           </div>
                         </div>
                       );
                     })}
                   </div>
                 </div>
-
               </div>
-            )}
+            </div>
 
             {/* 5. WEATHER & CIVIL DEFENSE ALERTS BOARD */}
-            {activeTab === 'alerts' && (
-              <div className="flex flex-col gap-6 fade-in">
+            <div
+              role="tabpanel"
+              id="panel-alerts"
+              aria-labelledby="tab-alerts"
+              tabIndex={activeTab === 'alerts' ? 0 : undefined}
+              {...(activeTab !== 'alerts' ? ({ hidden: 'until-found' } as Record<string, string>) : {})}
+              ref={(el) => {
+                if (!el) return;
+                el.onbeforematch = () => setActiveTab('alerts');
+              }}
+              className="hud-tabpanel"
+            >
+              <div className="hud-panel corner-ticks">
+                <h4 className="text-[10px] font-mono font-bold tracking-widest text-red border-b border-white/5 pb-2 mb-4 flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-red" />
+                  TABLÓN OFICIAL DE FENÓMENOS ADVERSOS (EUSKALMET & SOS DEIAK)
+                </h4>
                 
-                {/* Active official alerts board */}
-                <div className="hud-panel corner-ticks">
-                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#ff3e6c] border-b border-white/5 pb-2 mb-4 flex items-center gap-2">
-                    <ShieldAlert className="w-4 h-4 text-[#ff3e6c]" />
-                    TABLÓN OFICIAL DE FENÓMENOS ADVERSOS (EUSKALMET)
-                  </h4>
-                  
-                  <div className="flex flex-col gap-4">
-                    {alerts.filter(a => a.active).map(alert => {
-                      if (selectedProvince !== 'ALL' && selectedProvince !== alert.province) return null;
+                <div className="flex flex-col gap-4">
+                  {alerts.filter(a => a.active).map(alert => {
+                    if (selectedProvince !== 'ALL' && selectedProvince !== alert.province) return null;
+                    const isRed = alert.level === 'red';
+                    const isOrange = alert.level === 'orange';
 
-                      const isRed = alert.level === 'red';
-                      const isOrange = alert.level === 'orange';
-
-                      return (
-                        <div 
-                          key={alert.id} 
-                          className={`p-4 rounded border flex flex-col md:flex-row gap-4 items-start md:items-center justify-between ${
-                            isRed 
-                              ? 'bg-[#ff3e6c]/10 border-[#ff3e6c]/40 text-white' 
-                              : isOrange 
-                                ? 'bg-[#ff9100]/10 border-[#ff9100]/40 text-white' 
-                                : 'bg-[#d4af37]/10 border-[#d4af37]/30 text-white'
-                          }`}
-                        >
-                          <div className="flex items-start gap-3">
-                            <AlertTriangle className={`w-5 h-5 shrink-0 ${isRed ? 'text-[#ff3e6c] blink-red' : isOrange ? 'text-[#ff9100] blink-orange' : 'text-[#d4af37] blink-gold'}`} />
-                            <div className="flex flex-col">
-                              <span className={`text-[10px] font-mono font-bold uppercase tracking-widest ${
-                                isRed ? 'text-[#ff3e6c] blink-red' : isOrange ? 'text-[#ff9100] blink-orange' : 'text-[#d4af37] blink-gold'
-                              }`}>
-                                {alert.province} // {alert.type}
-                              </span>
-                              <p className="text-xs mt-1.5 leading-relaxed text-slate-100">{alert.message}</p>
-                            </div>
+                    return (
+                      <div 
+                        key={alert.id} 
+                        className={`p-4 rounded border flex flex-col md:flex-row gap-4 items-start md:items-center justify-between ${
+                          isRed 
+                            ? 'bg-red-10 border-red-35 text-white' 
+                            : isOrange 
+                              ? 'bg-orange-10 border-orange-35 text-white' 
+                              : 'bg-[#d4af37]/10 border-gold/35 text-white'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <AlertTriangle className={`w-5 h-5 shrink-0 ${isRed ? 'text-red blink-red' : isOrange ? 'text-orange blink-orange' : 'text-gold blink-gold'}`} />
+                          <div className="flex flex-col">
+                            <span className={`text-[10px] font-mono font-bold uppercase tracking-widest ${
+                              isRed ? 'text-red' : isOrange ? 'text-orange' : 'text-gold'
+                            }`}>
+                              {alert.province} // {alert.type}
+                            </span>
+                            <p className="text-xs mt-1.5 text-slate-100">{alert.message}</p>
                           </div>
-                          
-                          <span className={`px-2.5 py-1 rounded text-[8px] font-mono font-bold uppercase text-center shrink-0 ${
-                            isRed 
-                              ? 'bg-[#ff3e6c] text-[#030307] blink-red' 
-                              : isOrange 
-                                ? 'bg-[#ff9100] text-[#030307] blink-orange' 
-                                : 'bg-[#d4af37] text-[#030307] blink-gold'
-                          }`}>
-                            ALERTA {alert.level.toUpperCase()}
-                          </span>
                         </div>
-                      );
-                    })}
-                  </div>
+                        
+                        <button
+                          type="button"
+                          onClick={() => openEmergencyDialog(alert)}
+                          className="px-3 py-1.5 rounded bg-black/45 border border-white/15 text-[9px] font-mono font-bold uppercase text-cyan cursor-pointer shrink-0"
+                        >
+                          PROTOCOLO 112 →
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
-
               </div>
-            )}
+            </div>
 
             {/* 6. REPORT GENERATOR (TXOSTENAK) & PRINT */}
-            {activeTab === 'report' && (
-              <div className="flex flex-col gap-6 fade-in">
-                
-                {/* Controls and trigger panels */}
+            <div
+              role="tabpanel"
+              id="panel-report"
+              aria-labelledby="tab-report"
+              tabIndex={activeTab === 'report' ? 0 : undefined}
+              {...(activeTab !== 'report' ? ({ hidden: 'until-found' } as Record<string, string>) : {})}
+              ref={(el) => {
+                if (!el) return;
+                el.onbeforematch = () => setActiveTab('report');
+              }}
+              className="hud-tabpanel"
+            >
+              <div className="flex flex-col gap-6">
                 <div className="hud-panel corner-ticks flex flex-col md:flex-row gap-4 justify-between items-start md:items-center">
                   <div>
                     <h4 className="text-sm font-bold text-white font-mono uppercase">Generador de Informes / Txostenak</h4>
-                    <span className="text-[9px] text-[#00e5ff] font-mono tracking-widest uppercase">Exportar telemetría ambiental para protección civil</span>
+                    <span className="text-[9px] text-cyan font-mono tracking-widest uppercase">Exportar telemetría ambiental para protección civil</span>
                   </div>
                   
                   <div className="flex gap-2">
                     <button 
+                      type="button"
                       onClick={triggerPrint} 
-                      className="flex items-center gap-2 px-3 py-2 bg-[#00e5ff]/10 border border-[#00e5ff]/35 hover:bg-[#00e5ff] hover:text-[#030307] text-white text-xs font-mono font-bold uppercase tracking-wider rounded transition-all duration-200"
+                      className="flex items-center gap-2 px-3 py-2 bg-cyan-10 border border-cyan-35 text-white text-xs font-mono font-bold uppercase tracking-wider rounded cursor-pointer"
                       id="btn-print-report"
-                      aria-label="Imprimir Reporte"
                     >
-                      <Printer className="w-3.5 h-3.5 text-[#00e5ff]" />
+                      <Printer className="w-3.5 h-3.5 text-cyan" />
                       Imprimir
                     </button>
                     
                     <button 
+                      type="button"
                       onClick={sendEmail} 
-                      className="flex items-center gap-2 px-3 py-2 bg-[#d4af37]/10 border border-[#d4af37]/35 hover:bg-[#d4af37] hover:text-[#030307] text-white text-xs font-mono font-bold uppercase tracking-wider rounded transition-all duration-200"
+                      className="flex items-center gap-2 px-3 py-2 bg-[#d4af37]/10 border border-gold/35 text-white text-xs font-mono font-bold uppercase tracking-wider rounded cursor-pointer"
                       id="btn-email-report"
-                      aria-label="Enviar Reporte por Email"
                     >
-                      <Mail className="w-3.5 h-3.5 text-[#d4af37]" />
+                      <Mail className="w-3.5 h-3.5 text-gold" />
                       Enviar por Email
                     </button>
                   </div>
                 </div>
 
-                {/* Email Form fields */}
                 <div className="hud-panel corner-ticks flex flex-col gap-4">
-                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-[#d4af37] border-b border-white/5 pb-2 flex justify-between items-center">
+                  <h4 className="text-[10px] font-mono font-bold tracking-widest text-gold border-b border-white/5 pb-2 flex justify-between items-center">
                     <span>DESTINATARIO Y MENSAJE</span>
-                    {emailSuccess && <span className="text-[#00f5a0] blink-green font-bold">✓ REPORTE ENVIADO (SMTP OK)</span>}
+                    {emailSuccess && <span className="text-green blink-green font-bold">✓ REPORTE ENVIADO (SMTP OK)</span>}
                   </h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-[9px]">
                     <div className="flex flex-col gap-1.5">
-                      <label className="text-slate-500 uppercase">Destinatario:</label>
+                      <label htmlFor="input-email-recipient" className="text-slate-500 uppercase">Destinatario:</label>
                       <input 
-                        type="text" 
+                        type="email" 
                         value={emailForm.recipient} 
                         onChange={(e) => setEmailForm(prev => ({ ...prev, recipient: e.target.value }))}
-                        className="bg-black/45 border border-white/5 p-2.5 rounded text-white focus:outline-none focus:border-[#00e5ff]"
+                        className="bg-black/45 border border-white/10 p-2.5 rounded text-white"
                         id="input-email-recipient"
-                        aria-label="Correo del destinatario"
                       />
                     </div>
                     <div className="flex flex-col gap-1.5">
-                      <label className="text-slate-500 uppercase">Asunto / Subject:</label>
+                      <label htmlFor="input-email-subject" className="text-slate-500 uppercase">Asunto / Subject:</label>
                       <input 
                         type="text" 
                         value={emailForm.subject} 
                         onChange={(e) => setEmailForm(prev => ({ ...prev, subject: e.target.value }))}
-                        className="bg-black/45 border border-white/5 p-2.5 rounded text-white focus:outline-none focus:border-[#00e5ff]"
+                        className="bg-black/45 border border-white/10 p-2.5 rounded text-white"
                         id="input-email-subject"
-                        aria-label="Asunto del correo"
                       />
                     </div>
                   </div>
                 </div>
 
-                {/* SMTP Simulated Terminal Log screen */}
                 {(smtpLog.length > 0 || isSendingEmail) && (
-                  <div className="hud-panel corner-ticks bg-black border border-white/10 p-4 rounded font-mono text-[9px] text-[#00f5a0] flex flex-col gap-1 max-h-[250px] overflow-y-auto">
+                  <div className="hud-panel corner-ticks bg-black/45 border border-white/10 p-4 rounded font-mono text-[9px] text-green flex flex-col gap-1">
                     <span className="text-[8px] text-slate-500 uppercase tracking-widest border-b border-white/5 pb-1.5 mb-2 flex items-center justify-between">
                       SMTP LOG TELEMETRY GATEWAY
-                      {isSendingEmail && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
                     </span>
-                    <div className="space-y-1">
-                      {smtpLog.map((log, index) => (
-                        <div key={index} className={log.startsWith('✓') ? 'text-[#00e5ff]' : log.startsWith('354') ? 'text-yellow-400' : 'text-[#00f5a0]'}>
-                          {log}
-                        </div>
-                      ))}
-                    </div>
+                    {smtpLog.map((log, index) => (
+                      <div key={index} className={log.startsWith('✓') ? 'text-cyan font-bold' : 'text-green'}>
+                        {log}
+                      </div>
+                    ))}
                   </div>
                 )}
 
-                {/* Printable Environmental Report Page Layout */}
                 <div className="hud-panel border-white/15 bg-black/45 p-6 rounded flex flex-col gap-4 font-mono text-[9px] text-slate-300">
                   <div className="flex justify-between border-b border-white/10 pb-4 items-center">
                     <div className="flex flex-col">
                       <span className="text-xs font-bold text-white">EGUR-NEXUS TELEMETRY REPORT</span>
                       <span className="text-[7px] text-slate-500 mt-1">EUSKADI ENVIRONMENTAL PROTECTION PORTAL</span>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right tabular-nums">
                       <span className="text-slate-400 block">FECHA: {currentTime.toLocaleDateString('es-ES')}</span>
                       <span className="text-slate-400 block">HORA: {currentTime.toLocaleTimeString('es-ES')}</span>
                     </div>
                   </div>
-
-                  <div className="flex flex-col gap-4">
-                    <div>
-                      <span className="text-[#00e5ff] font-bold block mb-1">1. TELEMETRÍA DEL CLIMA (ESTADO ACTUAL)</span>
-                      <div className="grid grid-cols-3 gap-4 border-t border-white/5 pt-2">
-                        {Object.keys(capitalsData).map(k => {
-                          const c = capitalsData[k];
-                          return (
-                            <div key={k} className="flex flex-col gap-0.5">
-                              <span className="text-white font-bold">{c.name}</span>
-                              <span>Temp: {c.temp}°C (Sens: {c.apparentTemp}°C)</span>
-                              <span>Humedad: {c.humidity}% | Viento: {c.windSpeed} km/h ({c.windDirection}°)</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <div>
-                      <span className="text-[#00e5ff] font-bold block mb-1">2. HIDROLOGÍA Y ESTADO DE CAUCES</span>
-                      <div className="flex flex-col gap-1 border-t border-white/5 pt-2">
-                        {rivers.map(r => (
-                          <div key={r.id} className="flex justify-between">
-                            <span>Río {r.name}: Nivel {r.level}m (Límite: {r.criticalLevel}m)</span>
-                            <span className={r.status !== 'nominal' ? 'text-[#ff3e6c] font-bold' : 'text-[#00f5a0]'}>
-                              {r.status.toUpperCase()} (Caudal: {r.flow} m³/s)
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div>
-                      <span className="text-[#ff3e6c] font-bold block mb-1">3. REGISTRO DE ALERTAK REGISTRADAS</span>
-                      <div className="flex flex-col gap-1 border-t border-white/5 pt-2">
-                        {alerts.filter(a => a.active).map(a => (
-                          <div key={a.id} className="text-slate-100">
-                            • [{a.level.toUpperCase()}] {a.province}: {a.type} - {a.message}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
+                  <pre className="text-[9px] text-slate-300 font-mono" style={{ whiteSpace: 'pre-wrap' }}>
+                    {emailForm.body}
+                  </pre>
                 </div>
-
               </div>
-            )}
+            </div>
 
           </div>
 
@@ -1399,15 +1649,15 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
       </main>
 
       {/* FOOTER: Osiris-style Bottom coordinates & state bar */}
-      <footer className="no-print h-10 border-t border-white/5 bg-[#05050b]/90 text-slate-500 flex items-center px-6 justify-between text-[8px] font-mono uppercase tracking-[0.2em] z-40">
+      <footer className="no-print h-10 border-t border-white/5 bg-[#05050b]/90 text-slate-500 flex items-center px-6 justify-between text-[8px] font-mono uppercase tracking-widest z-40">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
             <span>SENSORS:</span>
-            <span className="text-[#00f5a0] font-bold">ORBITAL_LATTICE_OK</span>
+            <span className="text-green font-bold">ORBITAL_LATTICE_OK</span>
           </div>
           <div className="flex items-center gap-2">
-            <span>RADAR COMPASS:</span>
-            <span className="text-[#00e5ff]">360° SWEEP ACTIVE</span>
+            <span>WEB PLATFORM:</span>
+            <span className="text-cyan">BASELINE 2026 NATIVE</span>
           </div>
         </div>
         
@@ -1415,6 +1665,6 @@ Reporte generado automáticamente desde el terminal Egur-Nexus.`;
           <span>© 2026 EGUR-NEXUS // GUSTAVO SANABRIA // TODOS LOS DERECHOS RESERVADOS</span>
         </div>
       </footer>
-    </>
+    </div>
   );
 }
